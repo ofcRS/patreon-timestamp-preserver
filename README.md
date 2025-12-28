@@ -2,6 +2,8 @@
 
 Chrome extension that auto-saves your playback position on Patreon VODs and tracks your watch history.
 
+<img width="354" height="390" alt="image" src="https://github.com/user-attachments/assets/fa13e39d-a24e-4acc-9427-666a4ce45675" />
+
 ## Features
 
 - **Auto-save** - Saves your position every 15 seconds while watching
