@@ -1,4 +1,4 @@
-// Patreon Timestamp Preserver - Popup Script
+// Video Timestamp Preserver - Popup Script
 
 document.addEventListener('DOMContentLoaded', init);
 
@@ -65,7 +65,7 @@ async function loadVideos() {
 
   inProgressList.innerHTML = inProgress.length
     ? inProgress.map(([key, video]) => createVideoCard(key, video, false)).join('')
-    : createEmptyState('No videos in progress', 'Start watching a Patreon video to track it here.');
+    : createEmptyState('No videos in progress', 'Start watching a video to track it here.');
 
   completedList.innerHTML = completed.length
     ? completed.map(([key, video]) => createVideoCard(key, video, true)).join('')
@@ -87,7 +87,7 @@ function createVideoCard(key, video, isCompleted) {
       ${creatorHtml}
       <div class="video-duration-badge">${formatDuration(video.duration)} total</div>
       <div class="video-meta">
-        <span class="video-timestamp">${formatTime(video.timestamp)} / ${formatTime(video.duration)}</span>
+        <span class="video-timestamp">${formatTime(video.peakTimestamp || video.timestamp)} / ${formatTime(video.duration)}</span>
         <span class="video-progress-text">${progressPercent.toFixed(1)}%</span>
       </div>
       <div class="progress-bar">
