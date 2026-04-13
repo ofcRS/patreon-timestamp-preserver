@@ -9,10 +9,23 @@
   const GRACE_PERIOD = 45; // Seconds of sustained playback before accepting a backward seek
   const NEAR_PEAK_BUFFER = 5; // Seconds of tolerance for "near peak"
 
+  const DEBUG = true; // Set to false to silence debug logs
+  function log(...args) { if (DEBUG) console.log('PTS:', ...args); }
+  function warn(...args) { console.warn('PTS:', ...args); }
+
   let currentVideo = null;  // For Patreon (actual video element)
+  let trackedVideoKey = null; // URL key of the video we're already tracking
   let gdriveTrackingActive = false;  // For Google Drive (DOM-based tracking)
   let saveIntervalId = null;
   let hasRestoredPosition = false;
+  let findVideosPending = false; // Debounce flag for MutationObserver
+  let findVideosCallCount = 0; // Debug counter
+  let lastUrl = window.location.href; // SPA navigation detection
+  let pauseHandler = null;  // Stored listener refs for cleanup
+  let endedHandler = null;
+  let observer = null; // MutationObserver ref for cleanup
+  let navigationIntervalId = null; // SPA navigation check interval
+  let destroyed = false; // Set when extension context is invalidated
 
   // Peak tracking state
   let peakTimestamp = 0;
@@ -306,6 +319,36 @@
     }, TOAST_DURATION);
   }
 
+  // Tear down everything when extension context is invalidated
+  function destroy() {
+    if (destroyed) return;
+    destroyed = true;
+    stopTracking();
+    if (observer) {
+      observer.disconnect();
+      observer = null;
+    }
+    if (navigationIntervalId) {
+      clearInterval(navigationIntervalId);
+      navigationIntervalId = null;
+    }
+    currentVideo = null;
+    trackedVideoKey = null;
+    gdriveTrackingActive = false;
+    warn('Extension context invalidated — cleaned up all timers/observers');
+  }
+
+  // Check if extension context is still valid, destroy if not
+  function isContextValid() {
+    try {
+      void chrome.runtime.id;
+      return true;
+    } catch (e) {
+      destroy();
+      return false;
+    }
+  }
+
   // Reset peak tracking state
   function resetPeakState() {
     peakTimestamp = 0;
@@ -341,7 +384,7 @@
         peakTimestamp = currentTime;
         sustainedPlaybackTime = 0;
         sustainedPlaybackStart = isPlaying ? now : null;
-        console.log('PTS: Grace period elapsed, accepted new peak at', formatTime(currentTime));
+        log('Grace period elapsed, accepted new peak at', formatTime(currentTime));
       }
     }
 
@@ -350,6 +393,8 @@
 
   // Save current video state
   async function saveVideoState(force = false) {
+    if (destroyed || !isContextValid()) return;
+
     const site = getSiteType();
     let timestamp, duration;
 
@@ -396,15 +441,19 @@
       const videos = result.videos || {};
       videos[videoKey] = videoData;
       await chrome.storage.local.set({ videos });
-      console.log('PTS: Saved state -', formatTime(timestamp), '/', formatTime(duration));
+      log('Saved -', formatTime(timestamp), '/', formatTime(duration), '(peak:', formatTime(peakTimestamp) + ')');
     } catch (e) {
-      console.error('PTS: Error saving video state:', e);
+      if (e.message?.includes('Extension context invalidated')) {
+        destroy();
+      } else {
+        console.error('PTS: Error saving video state:', e);
+      }
     }
   }
 
   // Restore video position (Patreon only - video element)
   async function restoreVideoPosition() {
-    if (!currentVideo || hasRestoredPosition) return;
+    if (destroyed || !currentVideo || hasRestoredPosition) return;
 
     const videoKey = getVideoKey();
 
@@ -438,13 +487,17 @@
         }
       }
     } catch (e) {
-      console.error('PTS: Error restoring video position:', e);
+      if (e.message?.includes('Extension context invalidated')) {
+        destroy();
+      } else {
+        console.error('PTS: Error restoring video position:', e);
+      }
     }
   }
 
   // Show saved position notification for Google Drive (can't auto-seek iframe)
   async function showGDriveSavedPosition() {
-    if (hasRestoredPosition) return;
+    if (destroyed || hasRestoredPosition) return;
 
     const videoKey = getVideoKey();
 
@@ -466,36 +519,58 @@
         showToast(`Last position: ${formatTime(restorePoint)} - seek manually to resume`);
       }
     } catch (e) {
-      console.error('PTS: Error getting saved position:', e);
+      if (e.message?.includes('Extension context invalidated')) {
+        destroy();
+      } else {
+        console.error('PTS: Error getting saved position:', e);
+      }
     }
+  }
+
+  // Stop tracking the current video and clean up listeners
+  function stopTracking() {
+    if (saveIntervalId) {
+      clearInterval(saveIntervalId);
+      saveIntervalId = null;
+    }
+    if (currentVideo) {
+      if (pauseHandler) currentVideo.removeEventListener('pause', pauseHandler);
+      if (endedHandler) currentVideo.removeEventListener('ended', endedHandler);
+    }
+    pauseHandler = null;
+    endedHandler = null;
   }
 
   // Start tracking a video element (Patreon)
   function startTracking(video) {
     if (currentVideo === video) return;
 
-    // Stop tracking previous video
-    if (saveIntervalId) {
-      clearInterval(saveIntervalId);
-    }
+    const videoKey = getVideoKey();
+    const isSwap = (trackedVideoKey === videoKey);
+
+    // Clean up previous video's listeners/interval
+    stopTracking();
 
     currentVideo = video;
-    hasRestoredPosition = false;
-    resetPeakState();
+    trackedVideoKey = videoKey;
 
-    // Restore saved position
-    restoreVideoPosition();
+    if (isSwap) {
+      // Same page, React just replaced the <video> element — keep state, just reattach
+      log('Video element swapped (React re-render), reattaching. hasRestored:', hasRestoredPosition, 'peak:', formatTime(peakTimestamp));
+    } else {
+      // New video page — full initialization
+      hasRestoredPosition = false;
+      resetPeakState();
+      restoreVideoPosition();
+      log('Started tracking new video, key:', videoKey);
+    }
 
-    // Start periodic saving
+    // Always restart interval and listeners (they were cleared by stopTracking)
     saveIntervalId = setInterval(saveVideoState, SAVE_INTERVAL);
-
-    // Also save on pause and before unload
-    video.addEventListener('pause', () => saveVideoState(true));
-    video.addEventListener('ended', () => {
-      saveVideoState(true);
-    });
-
-    console.log('PTS: Started tracking video');
+    pauseHandler = () => saveVideoState(true);
+    endedHandler = () => saveVideoState(true);
+    video.addEventListener('pause', pauseHandler);
+    video.addEventListener('ended', endedHandler);
   }
 
   // Start tracking Google Drive video (DOM-based)
@@ -519,11 +594,12 @@
     }
     saveIntervalId = setInterval(saveVideoState, SAVE_INTERVAL);
 
-    console.log('PTS: Started tracking Google Drive video');
+    log('Started tracking Google Drive video');
   }
 
   // Find and track video elements
   function findVideos() {
+    findVideosCallCount++;
     const site = getSiteType();
 
     if (site === 'gdrive') {
@@ -531,16 +607,59 @@
       return;
     }
 
+    // Already tracking a video that's still in the DOM — nothing to do
+    if (currentVideo && document.contains(currentVideo)) {
+      return;
+    }
+
+    if (currentVideo && !document.contains(currentVideo)) {
+      log('Tracked video element was removed from DOM (call #' + findVideosCallCount + ')');
+    }
+
     // Patreon - look for video elements
     const videos = document.querySelectorAll('video');
+    log('findVideos call #' + findVideosCallCount + ': found', videos.length, 'video element(s)');
 
     for (const video of videos) {
-      // Skip tiny videos (likely thumbnails)
-      if (video.offsetWidth < 200) continue;
+      const rect = video.getBoundingClientRect();
+      if (rect.width < 200) {
+        log('  Skipping video, too small:', rect.width + 'x' + rect.height);
+        continue;
+      }
 
       // Track this video
       startTracking(video);
       return; // Only track one video at a time
+    }
+
+    log('  No suitable video found');
+  }
+
+  // Debounced version of findVideos — coalesces rapid-fire MutationObserver callbacks
+  function scheduleFindVideos() {
+    if (destroyed || findVideosPending) return;
+    findVideosPending = true;
+    requestAnimationFrame(() => {
+      findVideosPending = false;
+      if (!destroyed) findVideos();
+    });
+  }
+
+  // Check for SPA navigation (URL changed without full page reload)
+  function checkNavigation() {
+    if (destroyed) return;
+    const currentUrl = window.location.href;
+    if (currentUrl !== lastUrl) {
+      log('SPA navigation detected:', lastUrl, '->', currentUrl);
+      lastUrl = currentUrl;
+      // URL changed — reset tracking state for new page
+      stopTracking();
+      currentVideo = null;
+      trackedVideoKey = null;
+      gdriveTrackingActive = false;
+      hasRestoredPosition = false;
+      resetPeakState();
+      findVideos();
     }
   }
 
@@ -551,12 +670,17 @@
     // Initial check for videos
     findVideos();
 
-    // Watch for dynamically added videos
-    const observer = new MutationObserver((mutations) => {
+    // Watch for dynamically added videos — debounced to avoid hammering on React re-renders
+    observer = new MutationObserver((mutations) => {
+      let hasNewNodes = false;
       for (const mutation of mutations) {
         if (mutation.addedNodes.length) {
-          findVideos();
+          hasNewNodes = true;
+          break;
         }
+      }
+      if (hasNewNodes) {
+        scheduleFindVideos();
       }
     });
 
@@ -568,10 +692,10 @@
     // Save before page unload
     window.addEventListener('beforeunload', () => saveVideoState(true));
 
-    // Re-check periodically for SPA navigation
-    setInterval(findVideos, 2000);
+    // Check for SPA navigation periodically (much cheaper than findVideos — just compares URLs)
+    navigationIntervalId = setInterval(checkNavigation, 2000);
 
-    console.log('PTS: Video Timestamp Preserver initialized on', site);
+    log('Initialized on', site, '| URL:', window.location.href);
   }
 
   // Wait for DOM to be ready

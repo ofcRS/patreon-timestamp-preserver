@@ -1,17 +1,18 @@
 {
   "manifest_version": 3,
-  "name": "Patreon Timestamp Preserver",
-  "description": "Auto-saves your playback position on Patreon VODs and tracks watch history",
-  "version": "1.0.0",
+  "name": "Video Timestamp Preserver",
+  "description": "Auto-saves your playback position on Patreon and Google Drive videos and tracks watch history",
+  "version": "1.1.0",
   "permissions": [
     "storage"
   ],
   "host_permissions": [
-    "*://*.patreon.com/*"
+    "*://*.patreon.com/*",
+    "*://drive.google.com/*"
   ],
   "content_scripts": [
     {
-      "matches": ["*://*.patreon.com/*"],
+      "matches": ["*://*.patreon.com/*", "*://drive.google.com/file/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }
